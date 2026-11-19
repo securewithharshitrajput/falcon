@@ -13,8 +13,18 @@ import (
 // present. A classic use: `users/{id}` → set `{"id": "42"}` so falcon hits
 // a real resource that exists in the test environment.
 type ResourceOverride struct {
-	ByName map[string]string // param name → value (highest priority)
-	ByType map[string]string // param type → fallback value (integer → "1", string → "test")
+	ByName  map[string]string // param name → value (highest priority)
+	ByType  map[string]string // param type → fallback value (integer → "1", string → "test")
+	Methods map[string]bool   // allowed HTTP methods (nil/empty = all); keys are upper-case
+}
+
+// methodAllowed reports whether an operation with the given method should be
+// built. A nil/empty Methods set means "all methods".
+func (o ResourceOverride) methodAllowed(method string) bool {
+	if len(o.Methods) == 0 {
+		return true
+	}
+	return o.Methods[strings.ToUpper(method)]
 }
 
 // defaultByType are the fallback values falcon synthesizes when neither the
@@ -45,6 +55,9 @@ func Build(doc *Doc, baseURL string, over ResourceOverride) ([]engine.Request, e
 	out := make([]engine.Request, 0, len(doc.Operations))
 	for i := range doc.Operations {
 		op := &doc.Operations[i]
+		if !over.methodAllowed(op.Method) {
+			continue
+		}
 		path, err := fillPath(op.Path, op.Parameters, over)
 		if err != nil {
 			return nil, fmt.Errorf("op %s %s: %w", op.Method, op.Path, err)

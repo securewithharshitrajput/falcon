@@ -14,7 +14,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Status: authorized testing only](https://img.shields.io/badge/use-authorized%20testing%20only-critical)](#legal--ethics)
 
-Point falcon at an OpenAPI 3.x spec and **two test user accounts**, and it fires every endpoint as each identity in parallel, diffs the response matrix, and names what's wrong.
+Point falcon at an OpenAPI 3.x spec (**JSON or YAML**) and **two test user accounts**, and it fires every endpoint as each identity in parallel, diffs the response matrix, and names what's wrong.
 
 ---
 
@@ -38,12 +38,20 @@ Falcon is the open-source version of that capability. One YAML of credentials, o
 
 Body comparison uses SimHash (same approach as [hellhound](https://github.com/securewithharshitrajput/hellhound)), so per-request CSRF tokens, timestamps, and request IDs don't mask real IDOR matches.
 
+### Spec coverage
+
+Falcon reads the parts of an OpenAPI 3.x document it needs to fire realistic requests, and handles the shapes real-world specs actually use:
+
+- **JSON *and* YAML** specs, auto-detected — no need to pre-convert.
+- **`$ref` resolution** for parameters (`#/components/parameters/…`) and request bodies (`#/components/requestBodies/…`), so specs that factor these into `components` still produce usable requests.
+- **Path-level shared `parameters`** (applied to every method under a path item), with operation-level parameters overriding a shared one of the same name.
+
 ---
 
 ## Install
 
 ```bash
-go install github.com/securewithharshitrajput/falcon/cmd/falcon@v0.1.0
+go install github.com/securewithharshitrajput/falcon/cmd/falcon@v0.2.0
 ```
 
 Drops a `falcon` binary into `$(go env GOBIN)` (usually `~/go/bin`).
@@ -89,9 +97,10 @@ falcon --spec openapi.json \
 falcon --spec openapi.json -x http://127.0.0.1:8080 -k \
        --auth-a bearer:TOKA --auth-b bearer:TOKB
 
-# CI output — SARIF uploads to GitHub code scanning
-falcon --spec openapi.json --auth-a bearer:TOKA --auth-b bearer:TOKB \
-       --json out.json --sarif out.sarif
+# CI output — SARIF uploads to GitHub code scanning, and --fail-on
+# makes the job fail the build when a real auth bug is found
+falcon --spec openapi.yaml --auth-a bearer:TOKA --auth-b bearer:TOKB \
+       --json out.json --sarif out.sarif --fail-on high
 ```
 
 Sample output against a deliberately-vulnerable API:
@@ -127,22 +136,43 @@ falcon: 9 finding(s) for http://127.0.0.1:9980
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--spec` | *(required)* | Path to OpenAPI 3.x JSON spec |
+| `--spec` | *(required)* | Path to an OpenAPI 3.x spec — JSON or YAML |
 | `-u` | *(from spec)* | Target base URL; overrides the spec's `servers:` entry |
 | `--auth-a` | — | Auth for identity A (see auth formats below). At least one of `-a` / `-b` is required |
 | `--auth-b` | — | Auth for identity B — needed to detect cross-user access/IDOR |
 | `--anon` | `true` | Also run every request with no auth (catches missing-auth endpoints) |
 | `--invalid-token` | `true` | Also run every request with an obviously-invalid bearer (catches middleware that doesn't actually validate) |
+| `--methods` | *(all)* | Comma-separated HTTP methods to test, e.g. `GET,HEAD` for a read-only scan. Empty = every method in the spec |
 | `--resource` | — | Fill a spec parameter with a concrete value, repeatable: `--resource id=42 --resource slug=abc` |
-| `-c` | `10` | Concurrent requests across all identities |
+| `--fail-on` | `none` | Exit non-zero (`3`) if any finding is at or above this severity: `none` \| `info` \| `low` \| `medium` \| `high` |
+| `-c` | `10` | Concurrent requests across all identities **and operations** |
 | `-timeout` | `15s` | Per-request timeout |
 | `-k` | `false` | Skip TLS verification (self-signed dev/staging certs only) |
 | `-x` | — | Route all requests through an HTTP proxy (e.g. `http://127.0.0.1:8080` for Burp/ZAP) |
 | `--json` | — | Write findings as JSON to this path |
 | `--sarif` | — | Write findings as SARIF 2.1.0 to this path (for GitHub code scanning) |
 | `--no-banner` | `false` | Suppress the startup banner |
+| `--version` | — | Print falcon's version and exit |
 
 **Auth formats:** `bearer:<token>` | `cookie:<name=val; name=val>` | `basic:<user>:<pass>` | `header:<Name>=<Value>`
+
+### Safety: state-changing requests
+
+By default falcon tests **every** method the spec declares — including `POST`/`PUT`/`PATCH`/`DELETE`, which can mutate or delete data in the target. Before firing them it prints a loud warning counting the state-changing requests. For a non-destructive first pass, restrict to read methods:
+
+```bash
+falcon --spec openapi.yaml --methods GET,HEAD \
+       --auth-a bearer:TOKA --auth-b bearer:TOKB
+```
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Ran successfully; no findings met `--fail-on` (or `--fail-on none`) |
+| `1` | Failed to write a `--json` / `--sarif` report |
+| `2` | Usage / configuration error (bad flag, unreadable spec, no base URL) |
+| `3` | Findings at or above the `--fail-on` severity threshold — the CI-gate signal |
 
 ---
 
@@ -162,7 +192,8 @@ Falcon's differential model is deliberately small and explicit. For every operat
                        │
                        ▼
                 ┌─────────────┐
-                │   engine    │  fire N identities × M operations in parallel
+                │   engine    │  fire all N identities × M operations as one
+                │             │  bounded concurrent batch (-c governs the whole run)
                 └──────┬──────┘
                        │
                        ▼

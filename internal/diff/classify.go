@@ -64,16 +64,21 @@ func Classify(req engine.Request, identities []identity.Identity, responses []en
 	}
 	op := operationLabel(req)
 
-	// Index identities by convenient role tags.
+	// Index identities by convenient role tags. anonIdx/invalidIdx keep the
+	// actual slice positions so evidence rows can name the exact responses
+	// that drove a finding (not just "some anon response somewhere").
 	var anonResp, invalidResp *engine.Response
+	anonIdx, invalidIdx := -1, -1
 	var authed []int // indices of real (non-anon, non-invalid) identities
 	for i, id := range identities {
 		r := &responses[i]
 		switch {
 		case id.IsAnon:
 			anonResp = r
+			anonIdx = i
 		case id.IsInvalid:
 			invalidResp = r
+			invalidIdx = i
 		default:
 			authed = append(authed, i)
 		}
@@ -99,7 +104,7 @@ func Classify(req engine.Request, identities []identity.Identity, responses []en
 				Severity:    SeverityHigh,
 				Operation:   op,
 				Description: "no-auth request returned success with the same body shape as an authenticated request — the endpoint does not enforce authentication",
-				Evidence:    evidenceRows(identities, responses, i, indexOf(identities, anonResp)),
+				Evidence:    evidenceRows(identities, responses, i, anonIdx),
 			})
 			break // one finding per endpoint is enough — the point is made
 		}
@@ -117,7 +122,7 @@ func Classify(req engine.Request, identities []identity.Identity, responses []en
 					Severity:    SeverityHigh,
 					Operation:   op,
 					Description: "a request with an obviously invalid bearer token returned the same success body as a real-user request — token validation is not actually performed",
-					Evidence:    evidenceRows(identities, responses, i, indexOf(identities, invalidResp)),
+					Evidence:    evidenceRows(identities, responses, i, invalidIdx),
 				})
 				break
 			}
@@ -131,6 +136,14 @@ func Classify(req engine.Request, identities []identity.Identity, responses []en
 		for bi := ai + 1; bi < len(authed); bi++ {
 			a, b := responses[authed[ai]], responses[authed[bi]]
 			if !isSuccess(a) || !isSuccess(b) {
+				continue
+			}
+			// An empty (or whitespace-only) body is no evidence of a shared
+			// *resource*: two users both hitting an endpoint that returns an
+			// empty 200/204 is the single most common cross-user false
+			// positive. Require a substantive body on both sides before
+			// calling it IDOR.
+			if !substantive(a) || !substantive(b) {
 				continue
 			}
 			if !similarShape(a, b) {
@@ -218,6 +231,13 @@ func similarShape(a, b engine.Response) bool {
 	return Hamming(ha, hb) <= similarityThreshold
 }
 
+// substantive reports whether a response carries a non-trivial body after
+// volatile-token normalization — i.e. there is actual content whose shared
+// presence across identities is meaningful evidence.
+func substantive(r engine.Response) bool {
+	return len(Normalize(r.Body)) > 0
+}
+
 func pathHasID(fullURL string, req engine.Request) bool {
 	op, ok := req.Meta.(*spec.Operation)
 	if !ok {
@@ -236,13 +256,6 @@ func operationLabel(req engine.Request) string {
 		return req.Method + " " + op.Path
 	}
 	return req.Method + " " + req.URL
-}
-
-func indexOf(identities []identity.Identity, resp *engine.Response) int {
-	// We only need this for evidence generation and the response slice
-	// shares the same backing — compare by pointer equality via ranging.
-	// Returns -1 if not found, which evidenceRows handles gracefully.
-	return -1
 }
 
 func evidenceRows(identities []identity.Identity, responses []engine.Response, idx ...int) []EvidenceRow {
