@@ -36,7 +36,14 @@ Falcon is the open-source version of that capability. One YAML of credentials, o
 | **role-differential** | INFO | Users receive different authorization outcomes on the *same* non-ownership-scoped request — review whether this is intended RBAC or a vertical-privilege leak |
 | **auth-server-error** | LOW | 5xx under adversarial auth input — often an uncaught exception in auth middleware worth inspecting manually |
 
-Body comparison uses SimHash (same approach as [hellhound](https://github.com/securewithharshitrajput/hellhound)), so per-request CSRF tokens, timestamps, and request IDs don't mask real IDOR matches.
+Body comparison uses **token-shingle Jaccard similarity** over volatile-redacted responses, so per-request CSRF tokens, timestamps, and request IDs don't mask real IDOR matches — and, unlike a locality-sensitive hash, it stays accurate on the short minified-JSON bodies that real APIs actually return.
+
+falcon is also careful about **false positives**, which is what makes it usable rather than noisy:
+
+- **Soft denies** — an HTTP `200` carrying an error body like `{"error":"forbidden"}` — are treated as *denied*, not as served content, so a correctly-locked endpoint that refuses with `200` isn't flagged.
+- **Spec-declared public endpoints** (`security: []`) are expected to answer unauthenticated requests, so they're never reported as broken-auth. ("No `security` anywhere" is *not* treated as public — too many specs omit it — so real bugs on under-documented APIs still surface.)
+- **Overlapping findings are de-duplicated** into the single most-root-cause one: a fully-open endpoint reports `broken-authentication` alone, not three restatements of the same hole.
+- The **invalid-credential canary** mirrors each real user's auth scheme — a bogus *cookie* for a cookie API, a bogus *API key* for a header API — so "the server doesn't actually validate the credential" is caught beyond bearer tokens.
 
 ### Spec coverage
 
@@ -45,13 +52,16 @@ Falcon reads the parts of an OpenAPI 3.x document it needs to fire realistic req
 - **JSON *and* YAML** specs, auto-detected — no need to pre-convert.
 - **`$ref` resolution** for parameters (`#/components/parameters/…`) and request bodies (`#/components/requestBodies/…`), so specs that factor these into `components` still produce usable requests.
 - **Path-level shared `parameters`** (applied to every method under a path item), with operation-level parameters overriding a shared one of the same name.
+- **Header parameters** the spec declares (e.g. `X-Tenant-ID`) are sent, so an API that 400s without them still gets its auth logic exercised.
+- **Relative `servers` URLs** (e.g. `url: /api/v1`) are joined onto `-u`, so the spec's path prefix is preserved when you point falcon at a host.
+- **Unbuildable endpoints don't abort the scan.** A required path param with no example and no `--resource` is reported as a skip (naming the flag that would fix it); every other endpoint is still tested.
 
 ---
 
 ## Install
 
 ```bash
-go install github.com/securewithharshitrajput/falcon/cmd/falcon@v0.2.0
+go install github.com/securewithharshitrajput/falcon/cmd/falcon@v0.3.0
 ```
 
 Drops a `falcon` binary into `$(go env GOBIN)` (usually `~/go/bin`).
@@ -109,13 +119,13 @@ Sample output against a deliberately-vulnerable API:
 falcon: 9 finding(s) for http://127.0.0.1:9980
 
   [HIGH  ] broken-authentication    GET /public/stats
-        no-auth request returned success with the same body shape as an authenticated request — the endpoint does not enforce authentication
+        no-auth request was served protected content with the same body shape as an authenticated request — the endpoint does not enforce authentication
         - user-a           status=200 len=61
         - no-auth          status=200 len=61
         - invalid-token    status=200 len=61
 
   [HIGH  ] cross-user-access        GET /users/{id}
-        two distinct user identities received success responses with the same body shape — same resource visible to both (IDOR if the path addresses a specific resource)
+        two distinct user identities were served the same body shape — same resource visible to both (IDOR if the path addresses a specific resource)
         - user-a           status=200 len=102
         - user-b           status=200 len=102
         - no-auth          status=401 len=20
@@ -198,7 +208,7 @@ Falcon's differential model is deliberately small and explicit. For every operat
                        │
                        ▼
                 ┌─────────────┐
-                │   diff      │  SimHash-based body comparison +
+                │   diff      │  Jaccard-similarity body comparison +
                 │             │  pattern matching → named findings
                 └──────┬──────┘
                        │
@@ -208,7 +218,7 @@ Falcon's differential model is deliberately small and explicit. For every operat
                 └─────────────┘
 ```
 
-**Why SimHash for body comparison?** A naive byte-equality check misses IDOR when the server embeds a per-request CSRF token or timestamp into the response. A hash that ignores volatile tokens but preserves the content shape catches identity leaks across responses that aren't identical.
+**Why Jaccard similarity for body comparison?** A naive byte-equality check misses IDOR when the server embeds a per-request CSRF token or timestamp into the response. falcon redacts volatile values (UUIDs, timestamps, long hex), tokenizes the body structurally (so minified and pretty JSON compare identically), and measures the Jaccard overlap of the token shingles. Two responses carrying the same resource score as similar even when the bytes differ; two different users' data — whose field *values* differ — score as distinct. This replaced an earlier SimHash approach, which flipped too many bits on the short responses typical of APIs and silently missed real IDORs.
 
 ---
 

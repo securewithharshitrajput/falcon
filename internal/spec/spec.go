@@ -36,6 +36,11 @@ type Operation struct {
 	// SecuritySchemes declared on this op (empty means the op inherits the
 	// doc-level security, which falcon treats as "needs auth by default").
 	Security []string
+	// Public is true when the spec declares this operation needs no auth —
+	// op-level `security: []`, or no security requirement anywhere in the
+	// document. For such endpoints an unauthenticated success is the
+	// documented contract, not a broken-auth finding.
+	Public bool
 }
 
 // Parameter is one input the spec declares (path, query, or header).
@@ -256,6 +261,21 @@ func Parse(data []byte) (*Doc, error) {
 					op.Security = append(op.Security, name)
 				}
 			}
+			// Declared-public requires an EXPLICIT empty security declaration:
+			// op-level `security: []` (or `[{}]`), or — when the op states no
+			// security of its own — a doc-level `security: []`. "No security
+			// mentioned anywhere" is NOT treated as public: countless real
+			// specs omit security entirely yet still require auth, and
+			// suppressing every finding on those would hide real bugs. An
+			// endpoint meant to be public can be marked with `security: []`.
+			switch {
+			case rawOp.Security != nil:
+				op.Public = !hasRealRequirement(rawOp.Security)
+			case raw.Security != nil:
+				op.Public = !hasRealRequirement(raw.Security)
+			default:
+				op.Public = false
+			}
 			doc.Operations = append(doc.Operations, op)
 		}
 	}
@@ -336,6 +356,18 @@ func resolveBody(rb *rawRequestBody, comps rawComponents) *rawRequestBody {
 		return &resolved
 	}
 	return nil
+}
+
+// hasRealRequirement reports whether a `security` array actually mandates a
+// credential. An empty array, or one whose every requirement object is empty
+// (`[{}]`), means "no auth required."
+func hasRealRequirement(sec []map[string][]any) bool {
+	for _, req := range sec {
+		if len(req) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func convertParam(rp rawParameter, comps rawComponents) Parameter {

@@ -87,17 +87,70 @@ func Anonymous() Identity {
 	return Identity{Role: "no-auth", IsAnon: true}
 }
 
-// Invalid returns the deliberately-bogus-token identity. If the server
-// returns the same response for this as for a real token, the auth header
-// isn't actually validated — a surprisingly common misconfiguration where
-// middleware checks "header is present" instead of "header is valid."
+// canary is the obviously-invalid credential value falcon substitutes. It is
+// deliberately human-readable so it's recognizable in a target's logs.
+const canary = "falcon-canary-invalid-should-be-rejected"
+
+// Invalid returns the deliberately-bogus-token identity using a bearer token.
+// Prefer InvalidFrom, which matches the real users' auth scheme; this bearer
+// form remains for callers (and tests) that specifically want it.
 func Invalid() Identity {
 	return Identity{
-		Role: "invalid-token",
-		Headers: map[string]string{
-			"Authorization": "Bearer falcon-canary-definitely-not-valid-token-should-be-rejected",
-		},
+		Role:      "invalid-token",
+		Headers:   map[string]string{"Authorization": "Bearer " + canary},
 		IsInvalid: true,
+	}
+}
+
+// InvalidFrom builds the invalid-token identity by copying the credential
+// SHAPE of a real identity — the same header names and, for cookies, the same
+// cookie names — but replacing every credential VALUE with an obvious canary.
+// This is what makes "is the credential actually validated?" work beyond
+// bearer tokens: a cookie-based API gets a bogus cookie, an X-API-Key API gets
+// a bogus key, Basic auth gets bogus Basic creds. A real user that still
+// validated its token returns a denial here; one that only checks for the
+// header's PRESENCE returns the same content, which is the bug.
+func InvalidFrom(base Identity) Identity {
+	h := make(map[string]string, len(base.Headers))
+	for name, val := range base.Headers {
+		h[name] = garbleCredential(name, val)
+	}
+	if len(h) == 0 {
+		h["Authorization"] = "Bearer " + canary
+	}
+	return Identity{Role: "invalid-token", Headers: h, IsInvalid: true}
+}
+
+// garbleCredential replaces a credential value with the canary while keeping
+// enough structure that the server's auth middleware parses it the same way
+// (scheme word for Authorization, cookie names for Cookie).
+func garbleCredential(name, val string) string {
+	switch {
+	case strings.EqualFold(name, "Cookie"):
+		parts := strings.Split(val, ";")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if k, _, ok := strings.Cut(p, "="); ok {
+				out = append(out, k+"="+canary)
+			} else {
+				out = append(out, canary)
+			}
+		}
+		if len(out) == 0 {
+			return "session=" + canary
+		}
+		return strings.Join(out, "; ")
+	case strings.EqualFold(name, "Authorization"):
+		if scheme, _, ok := strings.Cut(val, " "); ok && scheme != "" {
+			return scheme + " " + canary
+		}
+		return canary
+	default:
+		return canary
 	}
 }
 

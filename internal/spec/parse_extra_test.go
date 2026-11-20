@@ -43,7 +43,7 @@ func TestParsePathLevelSharedParameters(t *testing.T) {
 		}
 	}
 	// And Build must fill it from the shared example — no "{id}" left over.
-	reqs, err := Build(doc, "", ResourceOverride{})
+	reqs, _, err := Build(doc, "", ResourceOverride{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestParseOperationParamOverridesShared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	reqs, _ := Build(doc, "", ResourceOverride{})
+	reqs, _, _ := Build(doc, "", ResourceOverride{})
 	if len(reqs) != 1 || !strings.Contains(reqs[0].URL, "/items/op-level") {
 		t.Errorf("operation-level param should win over shared; got %v", reqs)
 	}
@@ -129,7 +129,7 @@ func TestParseResolvesRequestBodyRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	reqs, _ := Build(doc, "", ResourceOverride{})
+	reqs, _, _ := Build(doc, "", ResourceOverride{})
 	if len(reqs) != 1 || !strings.Contains(string(reqs[0].Body), "zara") {
 		t.Errorf("request body ref not resolved into a body: %q", func() string {
 			if len(reqs) > 0 {
@@ -177,7 +177,7 @@ paths:
 	if len(doc.Operations) != 2 {
 		t.Fatalf("expected 2 ops from YAML, got %d", len(doc.Operations))
 	}
-	reqs, err := Build(doc, "", ResourceOverride{})
+	reqs, _, err := Build(doc, "", ResourceOverride{})
 	if err != nil {
 		t.Fatalf("Build from YAML spec: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestBuildMethodFilter(t *testing.T) {
 	    "/b/{sku}": {"delete": {"parameters": [{"name": "sku", "in": "path", "required": true}]}}
 	  }
 	}`))
-	reqs, err := Build(doc, "", ResourceOverride{Methods: map[string]bool{"GET": true}})
+	reqs, _, err := Build(doc, "", ResourceOverride{Methods: map[string]bool{"GET": true}})
 	if err != nil {
 		t.Fatalf("method-filtered Build should skip the unsatisfiable DELETE, got: %v", err)
 	}

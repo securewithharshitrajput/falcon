@@ -104,12 +104,9 @@ func run() int {
 	}
 	fmt.Fprintf(os.Stderr, "falcon: loaded spec %q v%s — %d operation(s)\n", doc.Title, doc.Version, len(doc.Operations))
 
-	effectiveBase := *baseURL
-	if effectiveBase == "" {
-		effectiveBase = doc.BaseURL
-	}
-	if effectiveBase == "" {
-		fmt.Fprintln(os.Stderr, "falcon: no base URL (spec has no `servers:` and -u not given)")
+	effectiveBase, err := spec.ResolveBase(doc, *baseURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "falcon: %v\n", err)
 		return 2
 	}
 
@@ -137,14 +134,19 @@ func run() int {
 		Methods: methodSet,
 	}
 
-	// Build the per-operation request templates.
-	templates, err := spec.Build(doc, effectiveBase, override)
+	// Build the per-operation request templates. Operations that can't be
+	// built (a required path param with no example and no --resource) are
+	// reported as skips, not fatal — the rest of the scan still runs.
+	templates, skipped, err := spec.Build(doc, effectiveBase, override)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "falcon: cannot build request templates: %v\n", err)
 		return 2
 	}
+	for _, s := range skipped {
+		fmt.Fprintf(os.Stderr, "falcon: skipped %s %s — %s\n", s.Method, s.Path, s.Reason)
+	}
 	if len(templates) == 0 {
-		fmt.Fprintln(os.Stderr, "falcon: no operations to test (spec had none, or --methods filtered them all out)")
+		fmt.Fprintln(os.Stderr, "falcon: no operations to test (spec had none, all were skipped, or --methods filtered them all out)")
 		return 2
 	}
 
@@ -235,12 +237,15 @@ func scan(ctx context.Context, eng *engine.Engine, templates []engine.Request, i
 // a clear error naming the missing input rather than a cryptic nil panic.
 func assembleIdentities(authA, authB string, anon, invalid bool) ([]identity.Identity, error) {
 	var ids []identity.Identity
+	var primary identity.Identity // first real user — the invalid canary mirrors its scheme
+	havePrimary := false
 	if authA != "" {
 		id, err := identity.ParseAuth("user-a", authA)
 		if err != nil {
 			return nil, fmt.Errorf("--auth-a: %w", err)
 		}
 		ids = append(ids, id)
+		primary, havePrimary = id, true
 	}
 	if authB != "" {
 		id, err := identity.ParseAuth("user-b", authB)
@@ -248,6 +253,9 @@ func assembleIdentities(authA, authB string, anon, invalid bool) ([]identity.Ide
 			return nil, fmt.Errorf("--auth-b: %w", err)
 		}
 		ids = append(ids, id)
+		if !havePrimary {
+			primary, havePrimary = id, true
+		}
 	}
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("at least one of --auth-a / --auth-b is required (falcon's whole point is DIFFERENTIAL testing; without a real user it's just a crawler)")
@@ -255,8 +263,11 @@ func assembleIdentities(authA, authB string, anon, invalid bool) ([]identity.Ide
 	if anon {
 		ids = append(ids, identity.Anonymous())
 	}
-	if invalid {
-		ids = append(ids, identity.Invalid())
+	if invalid && havePrimary {
+		// Mirror the real users' auth scheme (bearer, cookie, basic, custom
+		// header) with a canary value, so "is the credential actually
+		// validated?" works for every scheme — not just bearer.
+		ids = append(ids, identity.InvalidFrom(primary))
 	}
 	return ids, nil
 }

@@ -73,7 +73,7 @@ func TestParseRejectsOpenAPI2(t *testing.T) {
 
 func TestBuildFillsPathParamFromExample(t *testing.T) {
 	doc, _ := Parse([]byte(sampleSpec))
-	reqs, err := Build(doc, "", ResourceOverride{})
+	reqs, _, err := Build(doc, "", ResourceOverride{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -84,24 +84,33 @@ func TestBuildFillsPathParamFromExample(t *testing.T) {
 	}
 }
 
-func TestBuildErrorsOnMissingRequiredParamWithNoExample(t *testing.T) {
+func TestBuildSkipsMissingRequiredParamWithNoExample(t *testing.T) {
+	// One unbuildable endpoint must be reported as a skip (pointing at
+	// --resource) WITHOUT aborting the build of everything else.
 	broken := `{
 	  "openapi": "3.0.0",
 	  "info": {"title": "x", "version": "1"},
 	  "servers": [{"url": "http://x"}],
 	  "paths": {
+	    "/ok": {"get": {}},
 	    "/items/{sku}": {
 	      "get": {"parameters": [{"name":"sku","in":"path","required":true,"schema":{"type":"string"}}]}
 	    }
 	  }
 	}`
 	doc, _ := Parse([]byte(broken))
-	_, err := Build(doc, "", ResourceOverride{})
-	if err == nil {
-		t.Fatal("expected error for required param with no example and no override")
+	reqs, skipped, err := Build(doc, "", ResourceOverride{})
+	if err != nil {
+		t.Fatalf("Build must not hard-fail on one unbuildable op: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--resource") {
-		t.Errorf("error should point operator at --resource flag, got %v", err)
+	if len(reqs) != 1 || reqs[0].URL != "http://x/ok" {
+		t.Errorf("the buildable op should still be returned, got %v", reqs)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("expected 1 skipped op, got %d: %v", len(skipped), skipped)
+	}
+	if skipped[0].Path != "/items/{sku}" || !strings.Contains(skipped[0].Reason, "--resource") {
+		t.Errorf("skip should name the op and point at --resource, got %+v", skipped[0])
 	}
 }
 
@@ -117,7 +126,7 @@ func TestBuildHonorsResourceOverride(t *testing.T) {
 	  }
 	}`
 	doc, _ := Parse([]byte(broken))
-	reqs, err := Build(doc, "", ResourceOverride{ByName: map[string]string{"sku": "ABC-1"}})
+	reqs, _, err := Build(doc, "", ResourceOverride{ByName: map[string]string{"sku": "ABC-1"}})
 	if err != nil {
 		t.Fatalf("expected override to satisfy required param, got %v", err)
 	}
@@ -128,7 +137,7 @@ func TestBuildHonorsResourceOverride(t *testing.T) {
 
 func TestBuildCopiesRequestBodyExample(t *testing.T) {
 	doc, _ := Parse([]byte(sampleSpec))
-	reqs, _ := Build(doc, "", ResourceOverride{})
+	reqs, _, _ := Build(doc, "", ResourceOverride{})
 	var postReq int = -1
 	for i, r := range reqs {
 		if r.Method == "POST" {
